@@ -1,25 +1,29 @@
 import torch
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import numpy as np
+from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score
 from config import *
 
-@torch.no_grad()
 def evaluate(model, loader):
     model.eval()
     y_true, y_pred, y_prob = [], [], []
 
-    for x, y in loader:
-        x = x.to(DEVICE)
-        out = model(x)
-        prob = torch.softmax(out, 1)
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs = imgs.to(DEVICE)
+            outputs = model(imgs)
+            probs = torch.softmax(outputs, dim=1)
 
-        y_true.extend(y.numpy())
-        y_pred.extend(out.argmax(1).cpu().numpy())
-        y_prob.extend(prob[:,1].cpu().numpy())
+            y_true.extend(labels.numpy())
+            y_pred.extend(outputs.argmax(1).cpu().numpy())
+            y_prob.extend(probs[:,1].cpu().numpy())
 
-    print("\nConfusion Matrix:")
+    print("\nCONFUSION MATRIX")
     print(confusion_matrix(y_true, y_pred))
 
-    print("\nClassification Report:")
+    print("\nCLASSIFICATION REPORT")
     print(classification_report(y_true, y_pred, target_names=CLASS_NAMES))
 
     print("ROC-AUC:", roc_auc_score(y_true, y_prob))
+
+    conf = np.max(np.stack([1-np.array(y_prob), y_prob]), axis=0)
+    print(f"Confidence Mean={conf.mean():.4f} Std={conf.std():.4f}")
