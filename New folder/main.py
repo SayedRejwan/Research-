@@ -1,179 +1,92 @@
-import os
-import random
-import shutil
-
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, models
-from sklearn.metrics import confusion_matrix, classification_report
+import os
+import sys
 
-# ======================================================
-# CONFIG
-# ======================================================
-ROOT_DATA = r"F:\MLMI-2024 (Mosquito Larvae Microscopic Images)\MLMI-2024"
-WORK_DIR  = r"F:\MLMI_SPLIT"
+# Add current directory to path so imports work
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-TRAIN_RATIO = 0.8
-VAL_RATIO   = 0.1
-TEST_RATIO  = 0.1
+from models import build_resnet18, build_effnet_b0, build_convnext_tiny
+from dataset import get_dataloaders
+from train_single import train_model
+from ensemble_eval import ensemble_predict, ensemble_predict_weighted
 
-IMG_SIZE   = 224
-BATCH_SIZE = 16
-EPOCHS     = 10
-DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
+# --- CONFIGURATION ---
+# UPDATE THIS PATH to your actual dataset location
+# Expected structure:
+# dataset/
+#   train/
+#     class1/
+#     class2/
+#   test/
+#     ...
+DATA_ROOT = "../dataset"  # Assuming dataset is in the parent directory
+if not os.path.exists(DATA_ROOT):
+    # Fallback to check if we are in root
+    if os.path.exists("dataset"):
+        DATA_ROOT = "dataset"
+    else:
+        print(f"WARNING: Dataset not found at {DATA_ROOT}. Please edit DATA_ROOT in main.py")
 
-CLASSES = ["Aedes aegypti", "Culex quinquefasciatus"]
-VIEWS   = ["abdomen", "full body", "head", "siphon"]
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {DEVICE}")
 
-VALID_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+def main():
+    # 1. Load Data
+    print("Loading data...")
+    loaders = get_dataloaders(DATA_ROOT)
+    
+    if "train" not in loaders or "test" not in loaders:
+        print("Detailed instruction: Ensure your dataset has 'train' and 'test' folders.")
+        print("Exiting...")
+        return
 
-# ======================================================
-# SAFETY CHECKS
-# ======================================================
-print("Running on OS:", os.name)
-assert os.name == "nt", "❌ Must run locally on Windows"
+    # 2. Train Individual Models
+    print("\n=== Training ResNet-18 ===")
+    resnet = build_resnet18()
+    resnet = train_model(resnet, loaders, DEVICE, epochs=5) # Reduced epochs for demo
 
-assert os.path.exists(ROOT_DATA), f"❌ Dataset not found: {ROOT_DATA}"
+    print("\n=== Training EfficientNet-B0 ===")
+    effnet = build_effnet_b0()
+    effnet = train_model(effnet, loaders, DEVICE, epochs=5)
 
-print("Dataset path OK")
+    # 3. Standard Ensemble Evaluation (2 Models)
+    print("\n=== Evaluating 2-Model Ensemble (ResNet + EffNet) ===")
+    acc, auc, _, _ = ensemble_predict(
+        [resnet, effnet],
+        loaders["test"],
+        DEVICE
+    )
+    print(f"Ensemble (2) Results -> Accuracy: {acc:.4f}, ROC-AUC: {auc:.4f}")
 
-# ======================================================
-# COLLECT ALL IMAGES (IMAGE-LEVEL)
-# ======================================================
-all_images = []
-
-for cls in CLASSES:
-    for view in VIEWS:
-        view_dir = os.path.join(ROOT_DATA, cls, view)
-        for img in os.listdir(view_dir):
-            if img.lower().endswith(VALID_EXT):
-                all_images.append((cls, os.path.join(view_dir, img)))
-
-assert len(all_images) > 0, "❌ No images found"
-
-print(f"Total images found: {len(all_images)}")
-
-# ======================================================
-# SPLIT DATA
-# ======================================================
-random.shuffle(all_images)
-
-n_total = len(all_images)
-n_train = int(n_total * TRAIN_RATIO)
-n_val   = int(n_total * VAL_RATIO)
-
-splits = {
-    "train": all_images[:n_train],
-    "val":   all_images[n_train:n_train + n_val],
-    "test":  all_images[n_train + n_val:]
-}
-
-# ======================================================
-# CREATE SPLIT FOLDERS
-# ======================================================
-if os.path.exists(WORK_DIR):
-    shutil.rmtree(WORK_DIR)
-
-for split in splits:
-    for cls in CLASSES:
-        os.makedirs(os.path.join(WORK_DIR, split, cls), exist_ok=True)
-
-# ======================================================
-# COPY FILES SAFELY
-# ======================================================
-for split, items in splits.items():
-    for cls, src_path in items:
-        dst_path = os.path.join(
-            WORK_DIR,
-            split,
-            cls,
-            os.path.basename(src_path)
+    # 4. Extended Ensemble (3 Models) - As requested
+    # We train the 3rd model (ConvNeXt) and add it
+    print("\n=== Training ConvNeXt (3rd Model) ===")
+    try:
+        convnext = build_convnext_tiny()
+        convnext = train_model(convnext, loaders, DEVICE, epochs=5)
+        
+        print("\n=== Evaluating 3-Model Ensemble ===")
+        acc_3, auc_3, _, _ = ensemble_predict(
+            [resnet, effnet, convnext],
+            loaders["test"],
+            DEVICE
         )
-        shutil.copy2(src_path, dst_path)
+        print(f"Ensemble (3) Results -> Accuracy: {acc_3:.4f}, ROC-AUC: {auc_3:.4f}")
+        
+        # 5. Weighted Ensemble Example
+        # Giving more weight to the likely stronger models (e.g. EffNet & ConvNext)
+        print("\n=== Evaluating Weighted Ensemble (3 Models) ===")
+        # Weights: ResNet (0.2), EffNet (0.4), ConvNext (0.4)
+        acc_w, auc_w = ensemble_predict_weighted(
+            [resnet, effnet, convnext],
+            loaders["test"],
+            DEVICE,
+            weights=[0.2, 0.4, 0.4]
+        )
+        print(f"Weighted Ensemble Results -> Accuracy: {acc_w:.4f}, ROC-AUC: {auc_w:.4f}")
 
-print("Data split completed")
+    except Exception as e:
+        print(f"\nSkipping 3rd model extension due to error (possibly hardware/memory): {e}")
 
-# ======================================================
-# VERIFY SPLIT CONTENT
-# ======================================================
-for split in ["train", "val", "test"]:
-    for cls in CLASSES:
-        p = os.path.join(WORK_DIR, split, cls)
-        print(f"{split}/{cls}: {len(os.listdir(p))} images")
-
-# ======================================================
-# DATA LOADERS
-# ======================================================
-transform = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-])
-
-datasets_dict = {
-    split: datasets.ImageFolder(os.path.join(WORK_DIR, split), transform)
-    for split in ["train", "val", "test"]
-}
-
-loaders = {
-    split: DataLoader(datasets_dict[split], batch_size=BATCH_SIZE, shuffle=True)
-    for split in datasets_dict
-}
-
-# ======================================================
-# MODEL
-# ======================================================
-model = models.resnet18(weights="IMAGENET1K_V1")
-model.fc = nn.Linear(model.fc.in_features, len(CLASSES))
-model.to(DEVICE)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-
-# ======================================================
-# TRAINING
-# ======================================================
-for epoch in range(EPOCHS):
-    model.train()
-    correct, total = 0, 0
-
-    for x, y in loaders["train"]:
-        x, y = x.to(DEVICE), y.to(DEVICE)
-
-        optimizer.zero_grad()
-        out = model(x)
-        loss = criterion(out, y)
-        loss.backward()
-        optimizer.step()
-
-        pred = out.argmax(1)
-        correct += (pred == y).sum().item()
-        total += y.size(0)
-
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Accuracy: {correct/total:.4f}")
-
-# ======================================================
-# EVALUATION
-# ======================================================
-model.eval()
-y_true, y_pred = [], []
-
-with torch.no_grad():
-    for x, y in loaders["test"]:
-        x = x.to(DEVICE)
-        out = model(x)
-        pred = out.argmax(1).cpu().tolist()
-        y_true.extend(y.tolist())
-        y_pred.extend(pred)
-
-print("\nConfusion Matrix:")
-print(confusion_matrix(y_true, y_pred))
-
-print("\nClassification Report:")
-print(classification_report(y_true, y_pred, target_names=CLASSES))
-
-# ======================================================
-# SAVE MODEL
-# ======================================================
-torch.save(model.state_dict(), "mosquito_resnet18.pth")
-print("Model saved: mosquito_resnet18.pth")
+if __name__ == "__main__":
+    main()

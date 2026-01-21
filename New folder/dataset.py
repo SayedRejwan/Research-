@@ -1,28 +1,34 @@
-# dataset.py
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from config import DATA_ROOT, IMG_SIZE, BATCH_SIZE
+import os
 
-def get_dataloaders():
-    train_tf = transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
+def get_dataloaders(data_root, batch_size=32):
+    """
+    Creates DataLoaders for train, val, and test splits.
+    Expects data_root to contain 'train', 'val', and 'test' subdirectories.
+    """
+    # Standard ImageNet normalization
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
 
-    test_tf = transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.ToTensor()
-    ])
+    loaders = {}
+    splits = ["train", "val", "test"]
+    
+    # robust check for folders
+    for split in splits:
+        path = os.path.join(data_root, split)
+        if not os.path.exists(path):
+            print(f"Warning: {path} not found. Skipping loader for {split}.")
+            continue
+            
+        ds = datasets.ImageFolder(path, transform)
+        # Shuffle only for training
+        loaders[split] = DataLoader(ds, batch_size=batch_size, shuffle=(split=="train"))
 
-    train_ds = datasets.ImageFolder(f"{DATA_ROOT}/train", transform=train_tf)
-    val_ds   = datasets.ImageFolder(f"{DATA_ROOT}/val",   transform=test_tf)
-    test_ds  = datasets.ImageFolder(f"{DATA_ROOT}/test",  transform=test_tf)
-
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False)
-    test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False)
-
-    print(f"[DATA] Train={len(train_ds)} Val={len(val_ds)} Test={len(test_ds)}")
-
-    return train_dl, val_dl, test_dl
+    return loaders
